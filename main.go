@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"shopping/config"
 	"shopping/database"
+	db_queries "shopping/database/queries"
+	"shopping/repository"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +48,13 @@ var allUsers = map[string]*User{
 	"user":  {Role: "user", Username: "user", Password: "password"},
 }
 
+type App struct {
+	DBQueries              *db_queries.Queries
+	Config                 *config.Config
+	SessionRepository      repository.SessionRepository
+	ShoppingListRepository repository.ShoppingListRepository
+}
+
 func main() {
 	config := config.SetupConfig()
 	dbpool, err := database.NewDB(config)
@@ -54,13 +63,26 @@ func main() {
 	}
 	defer dbpool.Close()
 
-	http.HandleFunc("POST /v1/lists", adminRequired(handleCreateList))
-	http.HandleFunc("GET /v1/lists", authRequired(handleGetLists))
-	http.HandleFunc("PUT /v1/lists/{id}", adminRequired(handleUpdateList))
-	http.HandleFunc("DELETE /v1/lists/{id}", adminRequired(handleDeleteList))
-	http.HandleFunc("PATCH /v1/lists/{id}", adminRequired(handlePatchList))
-	http.HandleFunc("GET /v1/lists/{id}", authRequired(handleGetList))
-	http.HandleFunc("POST /v1/lists/{id}/push", adminRequired(handleListPush))
+	dbQueries := db_queries.New(dbpool)
+
+	// repositories
+	sessionRepo := repository.NewSessionRepository(dbQueries)
+	shoppingListRepo := repository.NewShoppingListRepository(dbQueries)
+
+	app := App{
+		DBQueries:              dbQueries,
+		Config:                 config,
+		SessionRepository:      sessionRepo,
+		ShoppingListRepository: shoppingListRepo,
+	}
+
+	http.HandleFunc("POST /v1/lists", app.adminRequired(handleCreateList))
+	http.HandleFunc("GET /v1/lists", app.authRequired(handleGetLists))
+	http.HandleFunc("PUT /v1/lists/{id}", app.adminRequired(handleUpdateList))
+	http.HandleFunc("DELETE /v1/lists/{id}", app.adminRequired(handleDeleteList))
+	http.HandleFunc("PATCH /v1/lists/{id}", app.adminRequired(handlePatchList))
+	http.HandleFunc("GET /v1/lists/{id}", app.authRequired(handleGetList))
+	http.HandleFunc("POST /v1/lists/{id}/push", app.adminRequired(handleListPush))
 
 	http.HandleFunc("POST /v1/login", handleLogin)
 
@@ -289,7 +311,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "invalid credentials", http.StatusUnauthorized)
 }
 
-func authRequired(next http.HandlerFunc) http.HandlerFunc {
+func (app *App) authRequired(next http.HandlerFunc) http.HandlerFunc {
 	fn := func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("Authorization")
 		if !strings.HasPrefix(token, "Bearer") {
@@ -299,20 +321,8 @@ func authRequired(next http.HandlerFunc) http.HandlerFunc {
 
 		token = token[7:]
 
-		if sessions[token] == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		if sessions[token].Expires.Before(time.Now()) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		userSession := sessions[token]
-		user := allUsers[userSession.Username]
-
-		if user == nil {
+		_, err := app.SessionRepository.GetSessionByToken(token)
+		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -323,8 +333,8 @@ func authRequired(next http.HandlerFunc) http.HandlerFunc {
 	return fn
 }
 
-func adminRequired(next http.HandlerFunc) http.HandlerFunc {
-	return authRequired(func(w http.ResponseWriter, r *http.Request) {
+func (app *App) adminRequired(next http.HandlerFunc) http.HandlerFunc {
+	return app.authRequired(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("Authorization")
 		token = token[7:]
 		user := allUsers[sessions[token].Username]

@@ -26,3 +26,6 @@ tasks:
   db:migrate:force:
     cmds:
       - migrate -database "postgresql://postgres:postgres@localhost:5433/shopping?sslmode=disable" -path ./database/migrations force {{.version}}
+  sqlc:
+    cmds:
+      - go tool sqlc generate
