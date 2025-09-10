@@ -10,3 +10,6 @@ tasks:
     cmds:
       - air
     silent: false
+  db:up:
+    cmds:
+      - docker compose up

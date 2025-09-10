@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"shopping/config"
+	"shopping/database"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +47,12 @@ var allUsers = map[string]*User{
 }
 
 func main() {
+	config := config.SetupConfig()
+	dbpool, err := database.NewDB(config)
+	if err != nil {
+		log.Fatal().Msgf("Cannot connect to the database")
+	}
+	defer dbpool.Close()
 
 	http.HandleFunc("POST /v1/lists", adminRequired(handleCreateList))
 	http.HandleFunc("GET /v1/lists", authRequired(handleGetLists))
@@ -58,7 +66,7 @@ func main() {
 
 	log.Info().Msgf("> Server running on http://localhost:%d\n", PORT)
 	// this blocks the thread so code after this line will not run
-	err := http.ListenAndServe(fmt.Sprintf(":%d", PORT), nil)
+	err = http.ListenAndServe(fmt.Sprintf(":%d", PORT), nil)
 	if err != nil {
 		panic(err)
 	}
