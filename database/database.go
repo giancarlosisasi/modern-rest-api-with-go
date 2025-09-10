@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/tracelog"
 	"github.com/rs/zerolog/log"
 )
 
@@ -20,6 +21,10 @@ func NewDB(config *config.Config) (*pgxpool.Pool, error) {
 
 	dbConfig.MaxConns = 30
 	dbConfig.MaxConnIdleTime = 15 * time.Minute
+	dbConfig.ConnConfig.Tracer = &tracelog.TraceLog{
+		Logger:   tracelog.LoggerFunc(logFunc),
+		LogLevel: tracelog.LogLevelDebug,
+	}
 
 	dbpool, err := pgxpool.NewWithConfig(context.Background(), dbConfig)
 	if err != nil {
@@ -36,4 +41,8 @@ func NewDB(config *config.Config) (*pgxpool.Pool, error) {
 	log.Info().Msg("> success to connect to the database")
 
 	return dbpool, nil
+}
+
+func logFunc(ctx context.Context, level tracelog.LogLevel, msg string, data map[string]interface{}) {
+	log.Debug().Msgf("[%s] %s %v", level, msg, data)
 }
