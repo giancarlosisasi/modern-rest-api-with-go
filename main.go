@@ -9,6 +9,7 @@ import (
 	"shopping/database"
 	db_queries "shopping/database/queries"
 	"shopping/repository"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,7 +23,6 @@ type ShoppingList struct {
 	Items []string `json:"items"`
 }
 
-var PORT = 8888
 var allData []ShoppingList = []ShoppingList{}
 
 type User struct {
@@ -76,19 +76,36 @@ func main() {
 		ShoppingListRepository: shoppingListRepo,
 	}
 
-	http.HandleFunc("POST /v1/lists", app.adminRequired(handleCreateList))
-	http.HandleFunc("GET /v1/lists", app.authRequired(handleGetLists))
-	http.HandleFunc("PUT /v1/lists/{id}", app.adminRequired(handleUpdateList))
-	http.HandleFunc("DELETE /v1/lists/{id}", app.adminRequired(handleDeleteList))
-	http.HandleFunc("PATCH /v1/lists/{id}", app.adminRequired(handlePatchList))
-	http.HandleFunc("GET /v1/lists/{id}", app.authRequired(handleGetList))
-	http.HandleFunc("POST /v1/lists/{id}/push", app.adminRequired(handleListPush))
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/lists", app.adminRequired(handleCreateList))
+	mux.HandleFunc("GET /v1/lists", app.authRequired(handleGetLists))
+	mux.HandleFunc("PUT /v1/lists/{id}", app.adminRequired(handleUpdateList))
+	mux.HandleFunc("DELETE /v1/lists/{id}", app.adminRequired(handleDeleteList))
+	mux.HandleFunc("PATCH /v1/lists/{id}", app.adminRequired(handlePatchList))
+	mux.HandleFunc("GET /v1/lists/{id}", app.authRequired(handleGetList))
+	mux.HandleFunc("POST /v1/lists/{id}/push", app.adminRequired(handleListPush))
 
-	http.HandleFunc("POST /v1/login", handleLogin)
+	mux.HandleFunc("POST /v1/login", handleLogin)
 
-	log.Info().Msgf("> Server running on http://localhost:%d\n", PORT)
-	// this blocks the thread so code after this line will not run
-	err = http.ListenAndServe(fmt.Sprintf(":%d", PORT), nil)
+	handler := app.enableCors(mux)
+
+	// certManager := autocert.Manager{
+	// 	Prompt:     autocert.AcceptTOS,
+	// 	HostPolicy: autocert.HostWhitelist("ourdomain.com"),
+	// 	Cache:      autocert.DirCache("certs"),
+	// }
+
+	// server := &http.Server{
+	// 	Addr:      ":https",
+	// 	Handler:   handler,
+	// 	TLSConfig: certManager.TLSConfig(),
+	// }
+
+	// go http.ListenAndServe(fmt.Sprintf(":%d", PORT), certManager.HTTPHandler(nil))
+	// server.ListenAndServeTLS("", "")
+
+	log.Info().Msgf("> Server running on http://localhost:%d\n", config.Port)
+	err = http.ListenAndServe(fmt.Sprintf(":%d", config.Port), handler)
 	if err != nil {
 		panic(err)
 	}
@@ -345,5 +362,83 @@ func (app *App) adminRequired(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		next(w, r)
+	})
+}
+
+func (app *App) enableCors(next http.Handler) http.Handler {
+	trustedOrigins := []string{
+		"http://localhost:9000",
+		"http://localhost:9002",
+		"http://localhost:3000",
+	}
+	allowedMethods := []string{
+		http.MethodGet,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+		http.MethodOptions,
+	}
+
+	allowedHeaders := []string{
+		"Authorization",
+		"Content-Type",
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Vary", "Origin")
+		w.Header().Add("Vary", "Access-Control-Request-Method")
+
+		origin := r.Header.Get("Origin")
+
+		if origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if slices.Contains(trustedOrigins, origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+
+			// check if the request has the HTTP method OPTIONS and contains
+			// the "Access-Control-Request-Method" header. If it does, then we treat
+			// it as a preflight request.
+			if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+				requestMethod := r.Header.Get("Access-Control-Request-Method")
+				if !slices.Contains(allowedMethods, requestMethod) {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+
+				requestedHeaders := r.Header.Get("Access-Control-Request-Headers")
+				if requestedHeaders != "" {
+					headerList := strings.Split(requestedHeaders, ",")
+					for _, header := range headerList {
+						header := strings.TrimSpace(header)
+						if !slices.Contains(allowedHeaders, header) {
+							w.WriteHeader(http.StatusForbidden)
+							return
+						}
+					}
+				}
+
+				// set the necessary preflight response headers
+				w.Header().Set("Access-Control-Allow-Methods", strings.Join(allowedMethods, ", "))
+				w.Header().Set("Access-Control-Allow-Headers", strings.Join(allowedHeaders, ", "))
+				// cache preflight requests for 5 minutes
+				// preflight requests add latency since the browser has to make an extra round-trip before the actual request
+				// caching them for 300seconds is a reasonable default that balances performance with flexibility
+				w.Header().Set("Access-Control-Max-Age", "300")
+
+				// write the headers along with a 200 ok status and return from
+				// the middleware with no further action
+				// set 200 ok and not 204 because some browsers doesn't support 204
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+		}
+
+		next.ServeHTTP(w, r)
+
 	})
 }
