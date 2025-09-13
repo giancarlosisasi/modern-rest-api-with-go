@@ -11,10 +11,120 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const createShoppingList = `-- name: CreateShoppingList :one
+INSERT INTO shopping_lists (name, items)
+VALUES ($1, $2)
+RETURNING id, name, items, created_at, updated_at
+`
+
+type CreateShoppingListParams struct {
+	Name  string
+	Items []string
+}
+
+func (q *Queries) CreateShoppingList(ctx context.Context, arg CreateShoppingListParams) (ShoppingList, error) {
+	row := q.db.QueryRow(ctx, createShoppingList, arg.Name, arg.Items)
+	var i ShoppingList
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Items,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const deleteShoppingListByID = `-- name: DeleteShoppingListByID :exec
+DELETE FROM shopping_lists
+WHERE id = $1
+`
+
+func (q *Queries) DeleteShoppingListByID(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteShoppingListByID, id)
+	return err
+}
+
+const getAllShoppingLists = `-- name: GetAllShoppingLists :many
+SELECT id, name, items, created_at, updated_at
+FROM shopping_lists
+`
+
+func (q *Queries) GetAllShoppingLists(ctx context.Context) ([]ShoppingList, error) {
+	rows, err := q.db.Query(ctx, getAllShoppingLists)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ShoppingList
+	for rows.Next() {
+		var i ShoppingList
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Items,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getShoppingListByID = `-- name: GetShoppingListByID :one
+SELECT id, name, items, created_at, updated_at
+FROM shopping_lists
+WHERE id = $1
+`
+
+func (q *Queries) GetShoppingListByID(ctx context.Context, id pgtype.UUID) (ShoppingList, error) {
+	row := q.db.QueryRow(ctx, getShoppingListByID, id)
+	var i ShoppingList
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Items,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const pushItemToShoppingList = `-- name: PushItemToShoppingList :one
+UPDATE shopping_lists
+SET items = items || $2, updated_at = NOW()
+WHERE id = $1
+RETURNING id, name, items, created_at, updated_at
+`
+
+type PushItemToShoppingListParams struct {
+	ID    pgtype.UUID
+	Items []string
+}
+
+func (q *Queries) PushItemToShoppingList(ctx context.Context, arg PushItemToShoppingListParams) (ShoppingList, error) {
+	row := q.db.QueryRow(ctx, pushItemToShoppingList, arg.ID, arg.Items)
+	var i ShoppingList
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Items,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const shoppingListPartialUpdate = `-- name: ShoppingListPartialUpdate :one
 UPDATE shopping_lists
 SET name = COALESCE($2, name),
-    items = COALESCE($3, items)
+    items = COALESCE($3, items),
+    updated_at = NOW()
 WHERE id = $1
 RETURNING id, name, items, created_at, updated_at
 `
@@ -27,6 +137,35 @@ type ShoppingListPartialUpdateParams struct {
 
 func (q *Queries) ShoppingListPartialUpdate(ctx context.Context, arg ShoppingListPartialUpdateParams) (ShoppingList, error) {
 	row := q.db.QueryRow(ctx, shoppingListPartialUpdate, arg.ID, arg.Name, arg.Items)
+	var i ShoppingList
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Items,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateShoppingListByID = `-- name: UpdateShoppingListByID :one
+UPDATE shopping_lists
+SET name = $2,
+    items = $3,
+    updated_at = NOW()
+WHERE id = $1
+RETURNING id, name, items, created_at, updated_at
+`
+
+type UpdateShoppingListByIDParams struct {
+	ID    pgtype.UUID
+	Name  string
+	Items []string
+}
+
+// its a full update
+func (q *Queries) UpdateShoppingListByID(ctx context.Context, arg UpdateShoppingListByIDParams) (ShoppingList, error) {
+	row := q.db.QueryRow(ctx, updateShoppingListByID, arg.ID, arg.Name, arg.Items)
 	var i ShoppingList
 	err := row.Scan(
 		&i.ID,

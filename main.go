@@ -1,19 +1,20 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net/http"
+	"os"
 	"shopping/config"
 	"shopping/database"
 	db_queries "shopping/database/queries"
 	"shopping/repository"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/rs/zerolog/log"
 )
 
@@ -53,6 +54,7 @@ type App struct {
 	Config                 *config.Config
 	SessionRepository      repository.SessionRepository
 	ShoppingListRepository repository.ShoppingListRepository
+	ListsCache             *lru.Cache[string, *db_queries.ShoppingList]
 }
 
 func main() {
@@ -69,23 +71,30 @@ func main() {
 	sessionRepo := repository.NewSessionRepository(dbQueries)
 	shoppingListRepo := repository.NewShoppingListRepository(dbQueries)
 
+	listsCache, err := lru.New[string, *db_queries.ShoppingList](128)
+	if err != nil {
+		log.Err(err).Msg("Unable to initialize the lists cache")
+		os.Exit(1)
+	}
+
 	app := App{
 		DBQueries:              dbQueries,
 		Config:                 config,
 		SessionRepository:      sessionRepo,
 		ShoppingListRepository: shoppingListRepo,
+		ListsCache:             listsCache,
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/lists", app.adminRequired(handleCreateList))
-	mux.HandleFunc("GET /v1/lists", app.authRequired(handleGetLists))
-	mux.HandleFunc("PUT /v1/lists/{id}", app.adminRequired(handleUpdateList))
-	mux.HandleFunc("DELETE /v1/lists/{id}", app.adminRequired(handleDeleteList))
-	mux.HandleFunc("PATCH /v1/lists/{id}", app.adminRequired(handlePatchList))
-	mux.HandleFunc("GET /v1/lists/{id}", app.authRequired(handleGetList))
-	mux.HandleFunc("POST /v1/lists/{id}/push", app.adminRequired(handleListPush))
+	mux.HandleFunc("POST /v1/lists", app.adminRequired(app.handleCreateList))
+	mux.HandleFunc("GET /v1/lists", app.authRequired(app.handleGetLists))
+	mux.HandleFunc("PUT /v1/lists/{id}", app.adminRequired(app.handleUpdateList))
+	mux.HandleFunc("DELETE /v1/lists/{id}", app.adminRequired(app.handleDeleteList))
+	mux.HandleFunc("PATCH /v1/lists/{id}", app.adminRequired(app.handlePatchList))
+	mux.HandleFunc("GET /v1/lists/{id}", app.authRequired(app.handleGetList))
+	mux.HandleFunc("POST /v1/lists/{id}/push", app.adminRequired(app.handleListPush))
 
-	mux.HandleFunc("POST /v1/login", handleLogin)
+	mux.HandleFunc("POST /v1/login", app.handleLogin)
 
 	handler := app.enableCors(mux)
 
@@ -112,31 +121,46 @@ func main() {
 
 }
 
-func handleCreateList(w http.ResponseWriter, r *http.Request) {
-	var newList ShoppingList
+type CreateShoppingListRequest struct {
+	Name  string   `json:"name"`
+	Items []string `json:"items"`
+}
+
+func (app *App) handleCreateList(w http.ResponseWriter, r *http.Request) {
+	var newList CreateShoppingListRequest
 	err := json.NewDecoder(r.Body).Decode(&newList)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	newList.ID = len(allData) + 1
 
-	allData = append(allData, newList)
+	newShoppingList, err := app.ShoppingListRepository.CreateShoppingList(newList.Name, newList.Items)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusCreated)
 
 	// encode automatically sets the content type to application/json
 	// more memory efficient for large objects instead of using json.Marshal + w.Header().Set + w.Write()
 	// its recommended over the manually marshal, write etc
 	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(newList)
+	err = json.NewEncoder(w).Encode(newShoppingList)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 }
 
-func handleGetLists(w http.ResponseWriter, r *http.Request) {
-	data, err := json.Marshal(allData)
+func (app *App) handleGetLists(w http.ResponseWriter, r *http.Request) {
+	lists, err := app.ShoppingListRepository.GetAllShoppingLists()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data, err := json.Marshal(lists)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -152,40 +176,56 @@ func handleGetLists(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleDeleteList(w http.ResponseWriter, r *http.Request) {
+func (app *App) handleDeleteList(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	for i, list := range allData {
-		if strconv.Itoa(list.ID) == id {
-			allData = append(allData[:i], allData[i+1:]...)
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+
+	err := app.ShoppingListRepository.DeleteShoppingListByID(id)
+	if err != nil {
+		http.Error(w, "list not found", http.StatusInternalServerError)
+		return
 	}
 
-	http.Error(w, "List not found", http.StatusNotFound)
+	app.ListsCache.Remove(id)
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleUpdateList(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	for i, list := range allData {
-		if strconv.Itoa(list.ID) == id {
-			var updatedList ShoppingList
-			err := json.NewDecoder(r.Body).Decode(&updatedList)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
+type updateListRequest struct {
+	Name  string   `json:"name"`
+	Items []string `json:"items"`
+}
 
-			allData[i] = updatedList
-			if err := json.NewEncoder(w).Encode(updatedList); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			return
-		}
+func (app *App) handleUpdateList(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var bodyData updateListRequest
+	err := json.NewDecoder(r.Body).Decode(&bodyData)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
-	http.Error(w, "List not found", http.StatusNotFound)
+	updatedList, err := app.ShoppingListRepository.UpdateShoppingListByID(
+		id,
+		bodyData.Name,
+		bodyData.Items,
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	app.ListsCache.Remove(id)
+
+	// w.Header().Set("Content-Type", "application/json")
+
+	err = json.NewEncoder(w).Encode(updatedList)
+	if err != nil {
+		log.Err(err).Msgf("failed to encode updated list data with id: %s", id)
+		http.Error(w, "failed to parse data", http.StatusInternalServerError)
+		return
+	}
+
 }
 
 type ShoppingListPatch struct {
@@ -193,112 +233,107 @@ type ShoppingListPatch struct {
 	Items *[]string `json:"items"`
 }
 
-func handlePatchList(w http.ResponseWriter, r *http.Request) {
+func (app *App) handlePatchList(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	for i, list := range allData {
-		if strconv.Itoa(list.ID) == id {
-			var patch ShoppingListPatch
-
-			err := json.NewDecoder(r.Body).Decode(&patch)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			if patch.Name != nil {
-				list.Name = *patch.Name
-			}
-			if patch.Items != nil {
-				list.Items = *patch.Items
-			}
-
-			// this is needed because we are not modifying the reference
-			allData[i] = list
-
-			w.Header().Set("Content-Type", "application/json")
-			err = json.NewEncoder(w).Encode(list)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			return
-		}
+	var data ShoppingListPatch
+	err := json.NewDecoder(r.Body).Decode(&data)
+	if err != nil {
+		http.Error(w, "invalid data", http.StatusBadRequest)
+		return
 	}
 
-	http.Error(w, "list not found", http.StatusNotFound)
+	updated, err := app.ShoppingListRepository.PartialUpdate(
+		id,
+		data.Name,
+		data.Items,
+	)
+	if err != nil {
+		log.Err(err).Msgf("error to patch update the list with id: %s", id)
+		http.Error(w, "list not found", http.StatusNotFound)
+		return
+	}
+
+	app.ListsCache.Remove(id)
+
+	err = json.NewEncoder(w).Encode(updated)
+	if err != nil {
+		log.Err(err).Msgf("failed to parse the updated data: %+v", updated)
+		http.Error(w, "failed to parse data", http.StatusInternalServerError)
+		return
+	}
 }
 
-func handleGetList(w http.ResponseWriter, r *http.Request) {
+func (app *App) handleGetList(w http.ResponseWriter, r *http.Request) {
+	var err error
 	id := r.PathValue("id")
 
-	for _, list := range allData {
-		if strconv.Itoa(list.ID) == id {
-			w.Header().Set("Content-Type", "application/json")
-
-			// err := json.NewEncoder(w).Encode(list)
-			// if err != nil {
-			// 	http.Error(w, err.Error(), http.StatusInternalServerError)
-			// 	return
-			// }
-
-			// option 2
-			data, err := json.Marshal(list)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			_, err = w.Write(data)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
+	// check cache first
+	list, ok := app.ListsCache.Get(id)
+	if !ok {
+		list, err = app.ShoppingListRepository.GetShoppingListByID(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		app.ListsCache.Add(id, list)
 	}
 
-	http.Error(w, "list not found", http.StatusNotFound)
+	data, err := json.Marshal(list)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-cache")
+
+	etag := fmt.Sprintf(`"%x"`, sha256.Sum256(data))
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	w.Header().Set("Etag", etag)
+
+	_, err = w.Write(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 }
 
 type ListPushAction struct {
 	Item string `json:"item"`
 }
 
-func handleListPush(w http.ResponseWriter, r *http.Request) {
+func (app *App) handleListPush(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	for i, list := range allData {
-		if strconv.Itoa(list.ID) == id {
-			w.Header().Set("Content-Type", "application/json")
-
-			var item ListPushAction
-			err := json.NewDecoder(r.Body).Decode(&item)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			list.Items = append(list.Items, item.Item)
-			allData[i] = list
-
-			err = json.NewEncoder(w).Encode(list)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			return
-		}
+	var data ListPushAction
+	err := json.NewDecoder(r.Body).Decode(&data)
+	if err != nil {
+		http.Error(w, "invalid data", http.StatusBadRequest)
+		return
 	}
 
-	http.Error(w, "list not found", http.StatusNotFound)
+	updated, err := app.ShoppingListRepository.PushItemToShoppingList(
+		id,
+		data.Item,
+	)
+	if err != nil {
+		http.Error(w, "list not found", http.StatusNotFound)
+		return
+	}
 
+	err = json.NewEncoder(w).Encode(updated)
+	if err != nil {
+		http.Error(w, "error to process data", http.StatusInternalServerError)
+		return
+	}
 }
 
-func handleLogin(w http.ResponseWriter, r *http.Request) {
+func (app *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var data LoginRequest
 	err := json.NewDecoder(r.Body).Decode(&data)
 	if err != nil {
@@ -308,15 +343,15 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user := allUsers[data.Username]
 	if user != nil && user.Password == data.Password {
-		token := strconv.Itoa(rand.Intn(100000000000))
-		sessions[token] = &Session{
-			Expires:  time.Now().Add(7 * 24 * time.Hour),
-			Username: user.Username,
+		session, err := app.SessionRepository.AddSession(user.Username)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 
-		err := json.NewEncoder(w).Encode(map[string]string{"token": token})
+		err = json.NewEncoder(w).Encode(map[string]string{"token": session.Token})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -354,7 +389,13 @@ func (app *App) adminRequired(next http.HandlerFunc) http.HandlerFunc {
 	return app.authRequired(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("Authorization")
 		token = token[7:]
-		user := allUsers[sessions[token].Username]
+		session, err := app.SessionRepository.GetSessionByToken(token)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		user := allUsers[session.Username]
 
 		if user.Role != "admin" {
 			http.Error(w, "forbidden", http.StatusForbidden)

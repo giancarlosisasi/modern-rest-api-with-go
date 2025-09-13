@@ -38,6 +38,7 @@ func (r *SessionPostgresRepository) AddSession(username string) (*db_queries.Add
 			Time:  time.Now().Add(7 * 24 * time.Hour),
 			Valid: true,
 		},
+		Username: username,
 	})
 
 	if err != nil {
@@ -54,7 +55,7 @@ func (r *SessionPostgresRepository) GetSessionByToken(token string) (*db_queries
 
 	row, err := r.DBQueries.GetSessionByToken(ctx, token)
 	if err != nil {
-		log.Debug().Msgf("> get session by token erro: %s", err.Error())
+		log.Debug().Msgf("> get session by token error: %s", err.Error())
 		return nil, err
 	}
 
