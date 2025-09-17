@@ -29,3 +29,6 @@ tasks:
   sqlc:
     cmds:
       - go tool sqlc generate
+  deploy:production:
+    cmds:
+      - gcloud run deploy book-shopping-api --source .
