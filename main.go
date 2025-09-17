@@ -86,7 +86,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/lists", app.adminRequired(app.handleCreateList))
+	mux.HandleFunc("POST /v1/lists", app.addCacheHeaders(app.authRequired(app.handleCreateList)))
 	mux.HandleFunc("GET /v1/lists", app.authRequired(app.handleGetLists))
 	mux.HandleFunc("PUT /v1/lists/{id}", app.adminRequired(app.handleUpdateList))
 	mux.HandleFunc("DELETE /v1/lists/{id}", app.adminRequired(app.handleDeleteList))
@@ -127,6 +127,7 @@ type CreateShoppingListRequest struct {
 }
 
 func (app *App) handleCreateList(w http.ResponseWriter, r *http.Request) {
+
 	var newList CreateShoppingListRequest
 	err := json.NewDecoder(r.Body).Decode(&newList)
 	if err != nil {
@@ -482,4 +483,13 @@ func (app *App) enableCors(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 
 	})
+}
+
+func (app *App) addCacheHeaders(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.Header().Set("Expires", time.Now().Add(5*time.Minute).Format(http.TimeFormat))
+
+		next(w, r)
+	}
 }

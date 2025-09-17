@@ -55,7 +55,7 @@ func (r *ShoppingListPostgresRepository) CreateShoppingList(name string, items [
 	})
 
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("error to create the new shopping list with name '%s% and items '%v'", name, items))
+		return nil, fmt.Errorf("error to create the new shopping list with name '%s' and items '%v'", name, items)
 	}
 
 	return &row, err
