@@ -14,6 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"shopping/docs"
+
+	httpSwagger "github.com/swaggo/http-swagger"
+
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/rs/zerolog/log"
 )
@@ -57,6 +61,17 @@ type App struct {
 	ListsCache             *lru.Cache[string, *db_queries.ShoppingList]
 }
 
+// @title Shopping List API
+// @version 0.1
+// @description Shopping list api with CRUD operations
+
+// @host localhost:8080
+// @BasePath /v1
+
+// @securityDefinitions.authToken AuthToken
+// @in header
+// @name Authorization
+// @description Send the jwt auth token in the Authorization token like `Authorization: Bearer <token>`
 func main() {
 	config := config.SetupConfig()
 	dbpool, err := database.NewDB(config)
@@ -95,6 +110,18 @@ func main() {
 	mux.HandleFunc("POST /v1/lists/{id}/push", app.adminRequired(app.handleListPush))
 
 	mux.HandleFunc("POST /v1/login", app.handleLogin)
+
+	mux.HandleFunc("GET /v1/swagger/", httpSwagger.Handler(
+		httpSwagger.URL("http://localhost:8080/v1/swagger/doc.json"),
+	))
+	mux.HandleFunc("GET /v1/swagger/doc.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(docs.SwaggerInfo.ReadDoc()))
+		if err != nil {
+			http.Error(w, "Failed to write response", http.StatusInternalServerError)
+			return
+		}
+	})
 
 	handler := app.enableCors(mux)
 
@@ -154,6 +181,17 @@ func (app *App) handleCreateList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GetShoppingLists godoc
+// @Summary Get all shopping lists
+// @Description Retrieve all shopping lists from the database
+// @Tags shopping-lists
+// @Accept json
+// @Produce json
+// @Security AuthToken
+// @Success 200 {array} object "List of shopping lists" example:[{"id":"123e4567-e89b-12d3-a456-426614174000","name":"Grocery List","items":["milk","bread","eggs"],"created_at":"2023-01-01T00:00:00Z","updated_at":"2023-01-01T00:00:00Z"}]
+// @Failure 401 {object} map[string]string "Unauthorized - Invalid or missing token"
+// @Failure 500 {object} map[string]string "Internal server error"
+// @Router /lists [get]
 func (app *App) handleGetLists(w http.ResponseWriter, r *http.Request) {
 	lists, err := app.ShoppingListRepository.GetAllShoppingLists()
 	if err != nil {
