@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"shopping/config"
@@ -154,16 +155,23 @@ type CreateShoppingListRequest struct {
 }
 
 func (app *App) handleCreateList(w http.ResponseWriter, r *http.Request) {
+	slog.Debug("Creating new shopping list",
+		slog.String("ip", r.RemoteAddr),
+		slog.String("user", r.Header.Get("X-User")),
+		slog.String("request_id", r.Header.Get("X-Request-ID")),
+	)
 
 	var newList CreateShoppingListRequest
 	err := json.NewDecoder(r.Body).Decode(&newList)
 	if err != nil {
+		slog.Info("invalid request body", slog.Any("error", err))
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	newShoppingList, err := app.ShoppingListRepository.CreateShoppingList(newList.Name, newList.Items)
 	if err != nil {
+		slog.Error("failed to create new shopping list", slog.Any("error", err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
